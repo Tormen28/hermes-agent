@@ -220,9 +220,19 @@ async def persist_delegation_delivery(adapter: Any, *, text: str, session_id: st
                 session_id = str(resolved)
         except Exception:
             logger.debug("delegation delivery continuation resolve failed for %s", session_id, exc_info=True)
-    await asyncio.to_thread(
+    # A live turn queues the delivery for the turn loop's next drain instead of raising (B2):
+    # the row is accepted either way, so log which half of the contract it took.
+    from hermes_state_detached_results import QueuedDetachedAdmission
+
+    outcome = await asyncio.to_thread(
         db.append_delegation_delivery, session_id, text, _delegation_display_metadata(evt or {}),
     )
+    if isinstance(outcome, QueuedDetachedAdmission):
+        logger.info(
+            "async delegation completion queued for the next drain (live turn) for api_server session %s",
+            session_id,
+        )
+        return
     logger.info(
         "async delegation completion persisted as delivery row for api_server session %s (no wake turn)", session_id
     )

@@ -1237,7 +1237,7 @@ capabilities:
 
 * `ctx.record_delegation_delivery(session_id, content, *, delegation_id, delivery_notice="", metadata=None)` records a delegation delivery;
   `ctx.record_completion_note(session_id, content, *, admission_id=None, display_kind="internal_notification", metadata=None)` records a
-  completion note. Both return the message id of the recorded row, or
+  completion note. Both return the message id of the recorded row, a `QueuedDetachedAdmission` when the destination turn is live (see below), or
   `None` when the capability is not granted (nothing is written, the
   denial is logged once).
 * **Idempotent by stable id.** A retry with the same `delegation_id` (plus
@@ -1255,9 +1255,15 @@ capabilities:
   can never redirect or defeat the recorded-once guarantee.
 * The destination is resolved to its live continuation tip first: a parent
   closed by compression never receives rows.
-* **Errors are raised, never swallowed.** A destination with a live turn
-  raises `SessionTurnLeaseLostError` — nothing is recorded, retry after
-  the turn ends. A compression-closed parent raises
+* **A live turn queues, it does not raise.** When the destination turn is live, the core cannot write
+  to the transcript directly (the turn holds the write lease), so the result waits in a durable queue
+  (`pending_detached_admissions`) and the call returns a `QueuedDetachedAdmission` — the result is
+  recorded once, do not retry. The turn loop drains it as an ordinary `user` row: at most one admission
+  per iteration (mid-turn, after the newest tool result) or one at the turn boundary (after the final
+  assistant message). The drain only admits rows whose session resolves to the live continuation tip,
+  and a row stays pending if no turn ever comes. Direct writes stay guarded: the lease still rejects
+  any other attempt to write mid-turn.
+* **Errors are raised, never swallowed.** A compression-closed parent raises
   `CompressionSessionClosedError` — the session is gone, do not retry the
   same id. An empty `session_id`, `content`, `delegation_id` or
   `display_kind` raises `ValueError`.

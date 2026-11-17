@@ -69,13 +69,18 @@ async def test_delivery_replay_is_atomic_across_continuation_and_busy_turn(tmp_p
         db.create_session("child", source="api_server", parent_session_id="parent")
         await send(adapters[0])
         assert db.get_messages("child") == []  # old event was already recorded in the lineage
-        from hermes_state_errors import SessionTurnLeaseLostError
         assert db.acquire_session_turn_lease("child", "client-turn", wait_seconds=0)
         later = {**evt, "delegation_id": "later-unit"}
         try:
-            with pytest.raises(SessionTurnLeaseLostError):
-                await send(adapters[0], later)
+            # A live turn queues the delivery for the turn loop's next drain instead of raising:
+            # the transcript stays empty until drained, but the row is already recorded once.
+            await send(adapters[0], later)
             assert db.get_messages("child") == []
+            queued = db.claim_pending_detached_admission("child", live_message_uids=frozenset())
+            assert queued is not None and queued["delegation_id"] == "later-unit"
+            # No live turn holds the row, so reconcile returns it to pending for the next drain.
+            assert db.reconcile_detached_admissions(
+                "child", live_message_uids=frozenset()) == {"deleted": 0, "reset": 1}
         finally:
             db.release_session_turn_lease("child", "client-turn")
         await send(adapters[0], later)

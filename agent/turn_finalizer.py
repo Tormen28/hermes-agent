@@ -14,6 +14,10 @@ from typing import Any, Callable, List, Optional, Tuple
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
 from agent.delegation_context import is_dispatcher_owned_worker_context
+from agent.detached_admission_drain import (
+    drain_pending_detached_admission_at_turn_end,
+    reconcile_detached_admissions,
+)
 from agent.interrupt_control import interrupted_during_api_call_reason
 from agent.turn_failure_copy import exit_reason_failure, stamp_failure
 from agent.context_compressor import _DB_PERSISTED_MARKER
@@ -759,6 +763,15 @@ def finalize_turn(
         if not interrupted and not failed and not vetoed:
             _micro_compact_after_turn(agent, messages, final_response, logger, effective_task_id)
         agent._persist_session(messages, conversation_history)
+        # B2: a detached result that arrived while this turn was live waited in the durable queue;
+        # admit at most one at the turn boundary so the next turn reloads it as an ordinary user
+        # row, then settle the queue rows this turn's flushes made durable. Skipped on interrupted
+        # or failed turns: their tail is closed by the failure path, and the next turn's drain
+        # picks the row up instead.
+        if not interrupted and not failed:
+            if drain_pending_detached_admission_at_turn_end(agent, messages) is not None:
+                agent._persist_session(messages, conversation_history)
+            reconcile_detached_admissions(agent, messages)
 
     _guarded_cleanup("persist_session", _persist_step, _cleanup_errors, logger)
 
