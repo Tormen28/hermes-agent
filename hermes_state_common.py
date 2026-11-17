@@ -755,6 +755,35 @@ CREATE TABLE IF NOT EXISTS async_delegations (
     origin_session_id TEXT NOT NULL DEFAULT ''
 );
 
+-- Durable queue of detached results that arrived while the destination turn was live (B2):
+-- the producer's transcript write is fenced by the turn lease, so the result waits here until
+-- the turn loop drains it as an ordinary user row. A row leaves the queue only once its
+-- transcript row is durable: the drain reconciles claimed rows against the compression lineage,
+-- so a crash between injection and flush re-admits the row instead of losing it, and a crash
+-- between flush and delete drops the queue row instead of duplicating it.
+CREATE TABLE IF NOT EXISTS pending_detached_admissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    delegation_id TEXT,
+    delivery_notice TEXT NOT NULL DEFAULT '',
+    admission_id TEXT,
+    content TEXT NOT NULL,
+    display_kind TEXT NOT NULL,
+    display_metadata TEXT NOT NULL DEFAULT '{}',
+    message_uid TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at REAL NOT NULL,
+    claimed_at REAL,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_detached_admissions_delivery
+    ON pending_detached_admissions(session_id, delegation_id, delivery_notice) WHERE delegation_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_detached_admissions_note
+    ON pending_detached_admissions(session_id, admission_id) WHERE admission_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_pending_detached_admissions_drain
+    ON pending_detached_admissions(session_id, status, created_at);
+
 -- Durable subagent records (tools/delegate_tool_resumable.py): what delegate_task(action='continue') rebuilds a
 -- child from after a restart or crash, and the worktree pin the startup sweep honours (``pinned``).
 CREATE TABLE IF NOT EXISTS resumable_subagents (

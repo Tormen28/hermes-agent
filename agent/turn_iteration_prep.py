@@ -16,6 +16,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
+from agent.detached_admission_drain import drain_pending_detached_admission
 from agent.display import KawaiiSpinner
 from agent.interrupt_control import interrupt_issuer, interrupted_during_api_call_reason
 from agent.turn_context_compaction import _reanchor
@@ -179,6 +180,11 @@ def prepare_iteration(
     _pre_api_steer = agent._drain_pending_steer()
     if _pre_api_steer:
         _inject_steer_after_newest_tool_result(agent, messages, _pre_api_steer)
+
+    # B2: a detached result that arrived while this turn was live waited in the durable queue;
+    # admit at most one per iteration as an ordinary user row after the newest tool result.
+    # Fail-open (no session db, no session id, or persistence disabled means no drain).
+    drain_pending_detached_admission(agent, messages)
 
     # One-shot run-budget wrap-up notice at 80% of agent.run_budget_seconds, appended to the
     # newest tool result; off with no budget.

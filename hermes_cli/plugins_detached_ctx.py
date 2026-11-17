@@ -14,10 +14,12 @@ The methods are generic plugin surface: they name no plugin, no team and no
 product concept. They need the ``state.detached_result`` capability; without
 it they return ``None`` and log once (fail closed, like ``side_question``).
 Errors raised by the core are documented, never swallowed: a destination with
-a live turn raises ``SessionTurnLeaseLostError`` (retry later — the result is
-not recorded), a compression-closed parent raises
-``CompressionSessionClosedError`` (the session is gone — do not retry the
-same id).
+a live turn no longer raises — the result is queued durably ("admitted for
+the next drain") and the call returns a ``QueuedDetachedAdmission``; the turn
+loop drains it as an ordinary user row (at most one per iteration, or one at
+the turn boundary), so the producer must not retry blindly. A
+compression-closed parent raises ``CompressionSessionClosedError`` (the
+session is gone — do not retry the same id).
 
 Contract of the keys a caller cannot override: ``metadata`` is the caller's
 own namespace, but the keys the core uses for idempotency are *reserved*
@@ -29,7 +31,10 @@ from the dedicated arguments and win over the same key in ``metadata``, so
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from hermes_state_detached_results import QueuedDetachedAdmission
 
 logger = logging.getLogger(__name__)
 
@@ -93,15 +98,18 @@ class PluginDetachedCtxMixin:
         delegation_id: str,
         delivery_notice: str = "",
         metadata: Optional[dict[str, Any]] = None,
-    ) -> Optional[int]:
+    ) -> Optional[int | QueuedDetachedAdmission]:
         """Record a detached delegation delivery once, keyed by ``delegation_id`` + ``delivery_notice``.
 
-        Returns the message id of the recorded (or already-recorded) row, or None when the
-        ``state.detached_result`` capability is not granted. ``metadata`` is stored with the row; the
-        reserved keys ``delegation_id`` and ``delivery_notice`` always come from the arguments. Raises
-        ``ValueError`` for an empty ``session_id``, ``content`` or ``delegation_id``; the core's
-        ``SessionTurnLeaseLostError`` when the destination session has a live turn (nothing is recorded —
-        retry after the turn ends) and ``CompressionSessionClosedError`` when the destination is a closed parent.
+        Returns the message id of the recorded (or already-recorded) row, or a
+        ``QueuedDetachedAdmission`` when the destination turn is live — the result waits in the
+        durable queue and the turn loop drains it as an ordinary user row (at most one per
+        iteration, or one at the turn boundary); do not retry: the row is already recorded once.
+        Returns ``None`` when the ``state.detached_result`` capability is not granted. ``metadata``
+        is stored with the row; the reserved keys ``delegation_id`` and ``delivery_notice`` always
+        come from the arguments. Raises ``ValueError`` for an empty ``session_id``, ``content`` or
+        ``delegation_id``; the core's ``CompressionSessionClosedError`` when the destination is a
+        closed parent.
         """
         if not self._granted_in_own_home(STATE_DETACHED_RESULT_CAPABILITY):
             return self._detached_result_denied()
@@ -122,20 +130,22 @@ class PluginDetachedCtxMixin:
         admission_id: Optional[str] = None,
         display_kind: str = "internal_notification",
         metadata: Optional[dict[str, Any]] = None,
-    ) -> Optional[int]:
+    ) -> Optional[int | QueuedDetachedAdmission]:
         """Record an unviewed completion's note, once per ``admission_id``.
 
-        Returns the message id of the recorded (or already-recorded) row, or None when the
-        ``state.detached_result`` capability is not granted. ``admission_id`` is the idempotency key:
-        the same string returns the existing row. ``None`` is kept as a real null (stored as JSON
-        ``null``, never the string ``"None"``) and has no key to match, so each call records its own
-        row; pass a stable id whenever a retry is possible. Any other non-string, or an empty string,
-        raises ``ValueError``. The reserved key ``completion_admission`` always comes from
-        ``admission_id``. Also raises ``ValueError`` for an empty ``session_id``, ``content`` or
-        ``display_kind``; the core's ``SessionTurnLeaseLostError`` when the destination session has a
-        live turn (nothing is recorded — retry after the turn ends) and ``CompressionSessionClosedError``
-        when the destination is a closed parent. ``display_kind`` selects how the row presents; prefer
-        the default unless the core documents a kind for your producer.
+        Returns the message id of the recorded (or already-recorded) row, or a
+        ``QueuedDetachedAdmission`` when the destination turn is live — the note waits in the
+        durable queue and the turn loop drains it as an ordinary user row; do not retry: the row is
+        already recorded once. Returns ``None`` when the ``state.detached_result`` capability is not
+        granted. ``admission_id`` is the idempotency key: the same string returns the existing row.
+        ``None`` is kept as a real null (stored as JSON ``null``, never the string ``"None"``) and
+        has no key to match, so each call records its own row; pass a stable id whenever a retry is
+        possible. Any other non-string, or an empty string, raises ``ValueError``. The reserved key
+        ``completion_admission`` always comes from ``admission_id``. Also raises ``ValueError`` for
+        an empty ``session_id``, ``content`` or ``display_kind``; the core's
+        ``CompressionSessionClosedError`` when the destination is a closed parent. ``display_kind``
+        selects how the row presents; prefer the default unless the core documents a kind for your
+        producer.
         """
         if not self._granted_in_own_home(STATE_DETACHED_RESULT_CAPABILITY):
             return self._detached_result_denied()
